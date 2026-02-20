@@ -10,6 +10,9 @@ Thumbs.db
 *.swo
 *~
 *.h5
+*.pt
+*.onnx
+*.png
 
 # IDE files
 .vscode/

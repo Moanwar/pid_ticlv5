@@ -2,22 +2,22 @@
 
 """
 # Single ROOT file
-python preprocess_simple.py --input data/sample.root
+python preprocessing_clu3d.py --input data/sample.root
 
 # Single text file with list of ROOT files
-python preprocess_simple.py --input file_list.txt
+python preprocessing_clu3d.py --input file_list.txt
 
 # Multiple text files
-python preprocess_simple.py --input list1.txt list2.txt list3.txt
+python preprocessing_clu3d.py --input list1.txt list2.txt list3.txt
 
 # Directory containing ROOT files
-python preprocess_simple.py --input /path/to/root/files/
+python preprocessing_clu3d.py --input /path/to/root/files/
 
 # Mix of sources
-python preprocess_simple.py --input single.root list.txt /data/dir/
+python preprocessing_clu3d.py --input single.root list.txt /data/dir/
 
 # With options
-python preprocess_simple.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
+python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
 """
 
 import os
