@@ -9,6 +9,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+*.h5
 
 # IDE files
 .vscode/
