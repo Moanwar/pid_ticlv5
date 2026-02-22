@@ -1,18 +1,18 @@
 """
 # Plot one example for each major particle type
-python visualize_graphs.py --input ticl_simplified.h5
+python visualize_graphs.py --input ticl_clu3d_data.h5
 
 # Plot specific PIDs
-python visualize_graphs.py --input ticl_simplified.h5 --pid 22 11 13 211
+python visualize_graphs.py --input ticl_clu3d_data.h5 --pid 22 11 13 211
 
 # Plot by particle groups (Photon, Electron, etc.)
-python visualize_graphs.py --input ticl_simplified.h5 --by-group
+python visualize_graphs.py --input ticl_clu3d_data.h5 --by-group
 
 # Plot 3 examples per type
-python visualize_graphs.py --input ticl_simplified.h5 --num-examples 3
+python visualize_graphs.py --input ticl_clu3d_data.h5 --num-examples 3
 
 # Custom output directory
-python visualize_graphs.py --input ticl_simplified.h5 --output-dir my_plots
+python visualize_graphs.py --input ticl_clu3d_data.h5 --output-dir my_plots
 """
 
 import h5py
@@ -24,16 +24,15 @@ import os
 from collections import defaultdict
 import random
 
-# ============================================
 # LABEL MAPPING (for reference)
-# ============================================
 
 particle_names = {
     22: 'Photon',
-    11: 'Electron',
-    13: 'Muon', 
-    111: 'pion0',
-    211: 'Charged Hadron', 321: 'Charged Hadron', 
+    11: 'Electron', -11: 'Electron',
+    13: 'Muon', -13: 'Muon',
+    111: 'Pion0',
+    211: 'Charged Hadron', -211: 'Charged Hadron', 
+    321: 'Charged Hadron', -321: 'Charged Hadron',
     310: 'Neutral Hadron', 130: 'Neutral Hadron',
     -1: 'Unknown',
     0: 'Noise'
@@ -44,9 +43,9 @@ particle_groups = {
     'Photon': [22],
     'Electron': [11],
     'Muon': [13],
-    'pion0': [111],
-    'Charged Hadron': [211, 321],
-    'Neutral Hadron': [310, 130],
+    'Pion0': [111],
+    'Charged_Hadron': [211, 321],
+    'Neutral_Hadron': [310, 130],
     'Other': [-1, 0]
 }
 
@@ -55,66 +54,123 @@ type_colors = {
     'Photon': 'gold',
     'Electron': 'blue',
     'Muon': 'red',
-    'pion0': 'green',
-    'Charged Hadron': 'purple',
-    'Neutral Hadron': 'orange',
+    'Pion0': 'green',
+    'Charged_Hadron': 'purple',
+    'Neutral_Hadron': 'orange',
     'Other': 'gray'
 }
 
-def find_tracksters_by_pid(h5_file, target_pid, max_per_type=5):
-    """
-    Find tracksters with given PID in the HDF5 file.
-    Returns list of indices.
-    """
+def get_particle_group(pid):
+    """Get group name for a PID"""
+    abs_pid = abs(pid)
+    for group_name, pid_list in particle_groups.items():
+        if abs_pid in pid_list:
+            return group_name
+    return 'Other'
+
+def find_trackster_indices_by_pid(h5_file, target_pid, max_clusters=20, target_energy=None, energy_tolerance=5.0):
     indices = []
     
     with h5py.File(h5_file, 'r') as f:
         num_tracksters = f.attrs['num_tracksters']
+        pids = f['true_pid'][:]
+        energies = f['true_energy'][:]
+        num_clusters = f['num_clusters'][:]
+        
+        abs_target = abs(target_pid)
         
         for i in range(num_tracksters):
-            grp = f[f'trackster_{i:08d}']
-            pid = grp['true_pid'][()]
+            pid = abs(pids[i])
             
-            # Check if PID matches (consider absolute value for grouping)
-            abs_pid = abs(pid)
+            # Check PID match
+            if pid != abs_target:
+                continue
             
-            # Determine which group this PID belongs to
-            for group_name, pid_list in particle_groups.items():
-                if abs_pid in pid_list or pid in pid_list:
-                    if group_name == target_pid:  # target_pid is actually group name here
-                        indices.append(i)
-                        break
+            # Check cluster count
+            if num_clusters[i] > max_clusters:
+                continue
+            
+            # Check energy if specified
+            if target_energy is not None:
+                if energies[i] < target_energy:
+                    continue
+            
+            indices.append(i)
+            
+            # Optional: limit if needed (caller can slice)
+    
+    return indices
+
+def find_trackster_indices_by_group(h5_file, group_name, max_clusters=20, target_energy=None, energy_tolerance=5.0, max_per_type=10):
+    if group_name not in particle_groups:
+        return []
+    
+    pid_list = particle_groups[group_name]
+    indices = []
+    
+    with h5py.File(h5_file, 'r') as f:
+        num_tracksters = f.attrs['num_tracksters']
+        pids = f['true_pid'][:]
+        energies = f['true_energy'][:]
+        num_clusters = f['num_clusters'][:]
+        
+        for i in range(num_tracksters):
+            pid = abs(pids[i])
+            
+            # Check if PID belongs to this group
+            if pid not in pid_list:
+                continue
+            
+            # Check cluster count
+            if num_clusters[i] > max_clusters:
+                continue
+            
+            # Check energy if specified
+            if target_energy is not None:
+                if energies[i] < target_energy :
+                    continue
+            
+            indices.append(i)
             
             if len(indices) >= max_per_type:
                 break
     
     return indices
 
-def find_trackster_by_abs_pid(h5_file, abs_pid, min_clusters=5):
-    """
-    Find a trackster with given absolute PID that has at least min_clusters.
-    Returns index or None.
-    """
+def get_trackster_data(h5_file, idx):
+    """Get all data for a specific trackster by index"""
     with h5py.File(h5_file, 'r') as f:
-        num_tracksters = f.attrs['num_tracksters']
+        # Get trackster features
+        features = f['features'][idx]  # [eta, phi, energy]
         
-        for i in range(num_tracksters):
-            grp = f[f'trackster_{i:08d}']
-            pid = abs(grp['true_pid'][()])
-            
-            if pid == abs_pid and 'clusters' in grp:
-                clusters = grp['clusters'][:]
-                if len(clusters) >= min_clusters:
-                    return i
+        # Get labels
+        pid = f['true_pid'][idx]
+        true_energy = f['true_energy'][idx]
+        
+        # Get clusters - stored as flat array, need reshaping
+        clusters_flat = f['clusters'][idx]
+        n_clusters = f['num_clusters'][idx]
+        
+        if n_clusters > 0:
+            clusters = clusters_flat.reshape(-1, 4)  # [N, 4]
+        else:
+            clusters = np.zeros((0, 4), dtype=np.float32)
     
-    return None
+    return {
+        'features': features,
+        'pid': pid,
+        'true_energy': true_energy,
+        'clusters': clusters,
+        'n_clusters': n_clusters,
+        'index': idx
+    }
 
 def build_edges_from_clusters(clusters):
-
-    # build edges based on layer structure:
-    # within same layer: fully connected
-    # between consecutive layers: fully connected
-
+    """
+    Build edges based on layer structure:
+    - within same layer: fully connected
+    - between consecutive layers: fully connected
+    """
     if len(clusters) == 0:
         return []
     
@@ -144,9 +200,12 @@ def build_edges_from_clusters(clusters):
                     edges.append((u, v))
     
     return edges
-def plot_trackster_3d(clusters, edges, title, output_file, highlight_energy=True):
-    #Create 3D plot with swapped axes:
 
+def plot_trackster_3d(clusters, edges, title, output_file, highlight_energy=True):
+    """
+    Create 3D plot with swapped axes:
+    X = phi, Y = layer, Z = eta
+    """
     fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
     
@@ -170,6 +229,7 @@ def plot_trackster_3d(clusters, edges, title, output_file, highlight_energy=True
                         edgecolors='black', 
                         linewidth=0.8)
     
+    # Plot only inter-layer edges
     for u, v in edges:
         if abs(layer[u] - layer[v]) > 0.1:  
             ax.plot([x_coords[u], x_coords[v]], 
@@ -177,146 +237,147 @@ def plot_trackster_3d(clusters, edges, title, output_file, highlight_energy=True
                     [z_coords[u], z_coords[v]], 
                     'gray', alpha=0.3, linewidth=1.0)
     
+    # Move z-axis to left
     ax.zaxis._axinfo['juggled'] = (2, 0, 1)  
     ax.zaxis.set_ticks_position('lower')  
     
-    #ax.view_init(elev=15, azim=-60)
+    # Set view angle
     ax.view_init(elev=20, azim=-45)
-    #ax.view_init(elev=0, azim=-75)
-    #ax.view_init(elev=10, azim=-80)
-    #ax.view_init(elev=20, azim=45)
     
-    ax.set_xlabel('phi', fontsize=12, fontweight='bold', labelpad=10)
+    # Labels
+    ax.set_xlabel('φ', fontsize=12, fontweight='bold', labelpad=10)
     ax.set_ylabel('Layer', fontsize=12, fontweight='bold', labelpad=10)
-    #ax.set_zlabel('eta', fontsize=12, fontweight='bold', labelpad=10)
-    ax.text2D(0.0005, 0.5, 'eta', transform=ax.transAxes, 
+    ax.text2D(0.005, 0.5, 'η', transform=ax.transAxes, 
               fontsize=12, fontweight='bold', va='center', ha='center')
-
 
     ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
     
+    # Colorbar
     cbar = plt.colorbar(scatter, ax=ax, pad=0.1, shrink=0.6)
     cbar.set_label('Energy (GeV)', fontsize=10)
     
-    ax.set_xlim(phi.min() - 0.1, phi.max() + 0.1)
-    ax.set_ylim(layer.min() - 1, layer.max() + 1)
+    # Set axis limits
+    if len(phi) > 0:
+        ax.set_xlim(phi.min() - 0.1, phi.max() + 0.1)
+    if len(layer) > 0:
+        ax.set_ylim(layer.min() - 1, layer.max() + 1)
     
     plt.tight_layout()
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    plt.show()
     plt.close()
     
     print(f"  Saved: {output_file}")
 
-
-def plot_multiple_tracksters(h5_file, pid_values, num_examples=1, output_dir='plots'):
-    #plot multiple tracksters for given PID values.
-    
+def plot_multiple_tracksters(h5_file, pid_values, num_examples=1, output_dir='plots', 
+                             max_clusters=20, target_energy=20.0, energy_tolerance=5.0):
+    """
+    Plot multiple tracksters for given PID values.
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     with h5py.File(h5_file, 'r') as f:
         num_tracksters = f.attrs['num_tracksters']
-        print(f"Total tracksters in file: {num_tracksters}")
+        print(f"Total tracksters in file: {num_tracksters:,}")
         
-        # Group tracksters by PID
-        pid_to_indices = defaultdict(list)
-        target_energy = 20.0
-        energy_tolerance = 5.0
-        max_clusters = 20
-        for i in range(num_tracksters):
-            grp = f[f'trackster_{i:08d}']
-            pid = grp['true_pid'][()]
-            abs_pid = abs(pid)
-            true_energy = grp['true_energy'][()]
-            if true_energy < target_energy :
-                continue
-            clusters = grp['clusters'][:]
-            n_clusters = len(clusters)
-            if n_clusters > max_clusters:
-                continue
-            
-            if 'clusters' in grp and len(grp['clusters'][:]) > 0:
-                pid_to_indices[abs_pid].append(i)
-        
-        print(f"Found tracksters for PIDs: {sorted(pid_to_indices.keys())}")
+        # Get all PIDs present
+        all_pids = np.unique(np.abs(f['true_pid'][:]))
+        print(f"PIDs present: {sorted(all_pids)}")
         
         # Plot for requested PID values
         for pid in pid_values:
-            if pid not in pid_to_indices:
-                print(f"Warning: No tracksters found for PID={pid}")
+            print(f"\n{'='*60}")
+            print(f"Looking for PID={pid} ({particle_names.get(pid, 'Unknown')})")
+            
+            # Find indices for this PID
+            indices = find_trackster_indices_by_pid(
+                h5_file, pid, 
+                max_clusters=max_clusters,
+                target_energy=target_energy,
+                energy_tolerance=energy_tolerance
+            )
+            
+            if not indices:
+                print(f"  No tracksters found matching criteria")
                 continue
             
-            indices = pid_to_indices[pid]
-            print(f"\nPID {pid} ({particle_names.get(pid, 'Unknown')}): {len(indices)} tracksters")
+            print(f"  Found {len(indices)} tracksters")
             
             # Select random examples
             selected = random.sample(indices, min(num_examples, len(indices)))
             
             for j, idx in enumerate(selected):
-                grp = f[f'trackster_{idx:08d}']
-                clusters = grp['clusters'][:]
-                true_energy = grp['true_energy'][()]
+                # Get trackster data
+                data = get_trackster_data(h5_file, idx)
+                clusters = data['clusters']
+                true_energy = data['true_energy']
+                actual_pid = data['pid']
                 
                 # Build edges
                 edges = build_edges_from_clusters(clusters)
                 
                 # Create plot
-                title = f"PID={pid} ({particle_names.get(pid, 'Unknown')})\n"
+                title = f"PID={actual_pid} ({particle_names.get(abs(actual_pid), 'Unknown')})\n"
                 title += f"True Energy: {true_energy:.2f} GeV | {len(clusters)} clusters"
                 
                 output_file = os.path.join(output_dir, f"pid_{pid}_example_{j+1}.png")
                 
                 plot_trackster_3d(clusters, edges, title, output_file)
-#Plot one example for each particle group.
-def plot_by_particle_group(h5_file, num_examples=1, output_dir='plots'):
+
+def plot_by_particle_group(h5_file, num_examples=1, output_dir='plots',
+                           max_clusters=20, target_energy=20.0, energy_tolerance=5.0):
+    """
+    Plot one example for each particle group.
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     with h5py.File(h5_file, 'r') as f:
         num_tracksters = f.attrs['num_tracksters']
+        print(f"Total tracksters in file: {num_tracksters:,}")
         
-        # Group tracksters by particle type
-        type_to_indices = defaultdict(list)
-        target_energy = 20.0
-        energy_tolerance = 5.0
-        max_clusters = 20
-        for i in range(num_tracksters):
-            grp = f[f'trackster_{i:08d}']
-            pid = grp['true_pid'][()]
-            abs_pid = abs(pid)
-            if true_energy < target_energy :
-                continue
-            clusters = grp['clusters'][:]
-            n_clusters = len(clusters)
-            if n_clusters > max_clusters:
-                continue
-
-            # Determine particle type
-            for group_name, pid_list in particle_groups.items():
-                if abs_pid in pid_list or pid in pid_list:
-                    if 'clusters' in grp and len(grp['clusters'][:]) > 0:
-                        type_to_indices[group_name].append(i)
-                    break
+        # Get stats per group
+        pids = f['true_pid'][:]
+        energies = f['true_energy'][:]
+        n_clusters = f['num_clusters'][:]
         
-        print("\nTracksters by particle type:")
-        for group_name, indices in type_to_indices.items():
-            if indices:
-                print(f"  {group_name}: {len(indices)} tracksters")
+        group_counts = defaultdict(int)
+        for pid in pids:
+            group = get_particle_group(pid)
+            group_counts[group] += 1
         
-        # Plot one example for each type that has tracksters
-        for group_name, indices in type_to_indices.items():
+        print("\nTracksters by particle group:")
+        for group, count in sorted(group_counts.items()):
+            if count > 0:
+                print(f"  {group}: {count:,} tracksters")
+        
+        # Plot for each group
+        for group_name in particle_groups.keys():
+            print(f"\n{'='*60}")
+            print(f"Plotting {group_name}...")
+            
+            # Find indices for this group
+            indices = find_trackster_indices_by_group(
+                h5_file, group_name,
+                max_clusters=max_clusters,
+                target_energy=target_energy,
+                energy_tolerance=energy_tolerance,
+                max_per_type=num_examples * 5  # Get more than needed for random selection
+            )
+            
             if not indices:
+                print(f"  No tracksters found for {group_name}")
                 continue
             
-            print(f"\nPlotting {group_name}...")
+            print(f"  Found {len(indices)} tracksters matching criteria")
             
             # Select random examples
             selected = random.sample(indices, min(num_examples, len(indices)))
             
             for j, idx in enumerate(selected):
-                grp = f[f'trackster_{idx:08d}']
-                clusters = grp['clusters'][:]
-                pid = grp['true_pid'][()]
-                true_energy = grp['true_energy'][()]
+                # Get trackster data
+                data = get_trackster_data(h5_file, idx)
+                clusters = data['clusters']
+                pid = data['pid']
+                true_energy = data['true_energy']
                 
                 # Build edges
                 edges = build_edges_from_clusters(clusters)
@@ -325,14 +386,14 @@ def plot_by_particle_group(h5_file, num_examples=1, output_dir='plots'):
                 title = f"{group_name} (PID={pid})\n"
                 title += f"True Energy: {true_energy:.2f} GeV | {len(clusters)} clusters"
                 
-                output_file = os.path.join(output_dir, f"{group_name.lower().replace(' ', '_')}_example_{j+1}.png")
+                output_file = os.path.join(output_dir, f"{group_name.lower()}_example_{j+1}.png")
                 
-                plot_trackster_3d(clusters, edges, title, output_file, highlight_energy=True)
+                plot_trackster_3d(clusters, edges, title, output_file)
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize trackster graphs in 3D')
     parser.add_argument('--input', '-i', type=str, required=True,
-                       help='Input HDF5 file')
+                       help='Input HDF5 file (columnar format)')
     parser.add_argument('--output-dir', '-o', type=str, default='graph_plots',
                        help='Output directory for plots')
     parser.add_argument('--pid', type=int, nargs='+', default=None,
@@ -341,17 +402,46 @@ def main():
                        help='Number of examples per PID/type')
     parser.add_argument('--by-group', action='store_true',
                        help='Plot by particle groups instead of individual PIDs')
+    parser.add_argument('--max-clusters', type=int, default=20,
+                       help='Max number of clusters per trackster')
+    parser.add_argument('--target-energy', type=float, default=20.0,
+                       help='Target energy for filtering (GeV)')
+    parser.add_argument('--energy-tolerance', type=float, default=5.0,
+                       help='Energy tolerance for filtering')
     
     args = parser.parse_args()
     
     if args.by_group:
-        plot_by_particle_group(args.input, args.num_examples, args.output_dir)
+        plot_by_particle_group(
+            args.input, 
+            args.num_examples, 
+            args.output_dir,
+            max_clusters=args.max_clusters,
+            target_energy=args.target_energy,
+            energy_tolerance=args.energy_tolerance
+        )
     elif args.pid:
-        plot_multiple_tracksters(args.input, args.pid, args.num_examples, args.output_dir)
+        plot_multiple_tracksters(
+            args.input, 
+            args.pid, 
+            args.num_examples, 
+            args.output_dir,
+            max_clusters=args.max_clusters,
+            target_energy=args.target_energy,
+            energy_tolerance=args.energy_tolerance
+        )
     else:
         # Default: plot all major particle types
         default_pids = [22, 11, 13, 111, 211, 310]
-        plot_multiple_tracksters(args.input, default_pids, args.num_examples, args.output_dir)
+        plot_multiple_tracksters(
+            args.input, 
+            default_pids, 
+            args.num_examples, 
+            args.output_dir,
+            max_clusters=args.max_clusters,
+            target_energy=args.target_energy,
+            energy_tolerance=args.energy_tolerance
+        )
 
 if __name__ == "__main__":
     main()

@@ -495,8 +495,9 @@ def main():
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         return 0.5 * (1.0 + np.cos(np.pi * progress))
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.6, patience=5, min_lr=1e-6
+    )
     # ---- AMP scaler ----
     scaler = torch.cuda.amp.GradScaler() if (args.amp and device.type == 'cuda') else None
     if scaler:
@@ -522,16 +523,14 @@ def main():
         train_loss, train_acc, train_gacc = train_epoch(
             model, train_loader, optimizer, criterion, device, scaler)
 
-        # Step the cosine scheduler once per epoch (after the epoch)
-        # (We step per batch inside train_epoch would require passing scheduler in;
-        #  per-epoch is fine for cosine schedules)
-        scheduler.step(epoch * len(train_loader) + len(train_loader))
-
         val_loss, val_acc, val_gacc, _, _ = evaluate(
             model, val_loader, criterion, device, scaler)
 
         current_lr = optimizer.param_groups[0]['lr']
+
         elapsed    = time.time() - t0
+
+        scheduler.step(val_gacc)
 
         for k, v in zip(history, [train_loss, val_loss, train_acc, val_acc,
                                    train_gacc, val_gacc]):
