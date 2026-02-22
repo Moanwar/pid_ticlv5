@@ -2,25 +2,25 @@
 
 """
 # Single ROOT file
-python preprocessing_clu3d.py --input data/sample.root
+python preprocessing_linking_pid.py --input data/sample.root
 
 # Single text file with list of ROOT files
-python preprocessing_clu3d.py --input file_list.txt
+python preprocessing_linking_pid.py --input file_list.txt
 
 # Multiple text files
-python preprocessing_clu3d.py --input list1.txt list2.txt list3.txt
+python preprocessing_linking_pid.py --input list1.txt list2.txt list3.txt
 
 # Directory containing ROOT files
-python preprocessing_clu3d.py --input /path/to/root/files/
+python preprocessing_linking_pid.py --input /path/to/root/files/
 
 # Mix of sources
-python preprocessing_clu3d.py --input single.root list.txt /data/dir/
+python preprocessing_linking_pid.py --input single.root list.txt /data/dir/
 
 # With options
-python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
+python preprocessing_linking_pid.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
 
 # Only merge already-processed partial files (skip processing, useful after a crash)
-python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --merge-only
+python preprocessing_linking_pid.py --input file_list.txt --output mydata.h5 --merge-only
 """
 
 import os
@@ -133,7 +133,7 @@ def process_root_file(file_path, partial_dir):
     try:
         file = uproot.open(file_path)
 
-        tracksters_tree   = load_branch_with_highest_cycle(file, 'ticlDumper/ticlTrackstersCLUE3DHigh')
+        tracksters_tree   = load_branch_with_highest_cycle(file, 'ticlDumper/ticlCandidate')
         simcandidate_tree = load_branch_with_highest_cycle(file, 'ticlDumper/simTICLCandidate')
         associations_tree = load_branch_with_highest_cycle(file, 'ticlDumper/associations')
         clusters_tree     = load_branch_with_highest_cycle(file, 'ticlDumper/clusters')
@@ -146,12 +146,12 @@ def process_root_file(file_path, partial_dir):
         clusters   = clusters_tree.arrays(CLUSTER_FEATURES,     library="ak")
 
         assoc_branches = list(dict.fromkeys([
-            'ticlTrackstersCLUE3DHigh_simToReco_CP_sharedE',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP',
-            'ticlTrackstersCLUE3DHigh_simToReco_CP_score',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP_score',
-            'ticlTrackstersCLUE3DHigh_simToReco_CP',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP_sharedE',
+            'ticlCandidate_simToReco_CP_sharedE',
+            'ticlCandidate_recoToSim_CP',
+            'ticlCandidate_simToReco_CP_score',
+            'ticlCandidate_recoToSim_CP_score',
+            'ticlCandidate_simToReco_CP',
+            'ticlCandidate_recoToSim_CP_sharedE',
         ]))
         assoc = associations_tree.arrays(assoc_branches, library="ak")
 
@@ -162,13 +162,13 @@ def process_root_file(file_path, partial_dir):
 
         for event_idx in range(len(tracksters)):
             try:
-                sim_to_reco_sharedE = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP_sharedE'][event_idx]
+                sim_to_reco_sharedE = assoc['ticlCandidate_simToReco_CP_sharedE'][event_idx]
                 if sim_to_reco_sharedE is None or len(sim_to_reco_sharedE) == 0:
                     continue
 
-                reco_to_sim_scores = assoc['ticlTrackstersCLUE3DHigh_recoToSim_CP_score'][event_idx]
-                sim_to_reco_scores = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP_score'][event_idx]
-                sim_to_reco_index  = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP'][event_idx]
+                reco_to_sim_scores = assoc['ticlCandidate_recoToSim_CP_score'][event_idx]
+                sim_to_reco_scores = assoc['ticlCandidate_simToReco_CP_score'][event_idx]
+                sim_to_reco_index  = assoc['ticlCandidate_simToReco_CP'][event_idx]
 
                 # Convert cluster arrays to numpy ONCE per event
                 ev_clu_eta   = np.abs(np.asarray(clusters['position_eta'][event_idx],    dtype=np.float32))
@@ -242,7 +242,7 @@ def process_root_file(file_path, partial_dir):
             except Exception:
                 continue
 
-        # Write to disk immediately — frees all RAM for this file
+        # Write to disk immediately frees all RAM for this file
         if valid_records:
             write_records_to_h5(valid_records, partial_h5)
             return len(valid_records), partial_h5
@@ -422,8 +422,8 @@ def main():
     parser = argparse.ArgumentParser(description='Optimised preprocessing for TICL PID data')
     parser.add_argument('--input', '-i', type=str, nargs='+', required=True,
                         help='Input: .root file(s), .txt file(s) with file lists, or directory(ies)')
-    parser.add_argument('--output', '-o', type=str, default='ticl_clu3d_data.h5',
-                        help='Output HDF5 file (default: ticl_clu3d_data.h5)')
+    parser.add_argument('--output', '-o', type=str, default='ticl_linking_data_pid.h5',
+                        help='Output HDF5 file (default: ticl_linking_data_pid.h5)')
     parser.add_argument('--partial-dir', type=str, default=None,
                         help='Directory for per-file partial HDF5 files '
                              '(default: <output_stem>_partials/)')
