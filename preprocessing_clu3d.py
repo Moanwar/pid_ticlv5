@@ -19,6 +19,12 @@ python preprocessing_clu3d.py --input single.root list.txt /data/dir/
 # With options
 python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
 
+#Just merge with no shuffle
+python preprocessing_clu3d.py --input dummy --output ticl_clu3d_data.h5 --merge-only --no-shuffle --partial-dir ticl_clu3d_data_partials/
+
+#merge and shuffle
+python preprocessing_clu3d.py --input dummy --output ticl_clu3d_data.h5 --merge-only --partial-dir ticl_clu3d_data_partials/
+
 # Only merge already-processed partial files (skip processing, useful after a crash)
 python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --merge-only
 """
@@ -242,7 +248,7 @@ def process_root_file(file_path, partial_dir):
             except Exception:
                 continue
 
-        # Write to disk immediately — frees all RAM for this file
+        # Write to disk immediately frees all RAM for this file
         if valid_records:
             write_records_to_h5(valid_records, partial_h5)
             return len(valid_records), partial_h5
@@ -299,18 +305,31 @@ def collect_input_files(input_paths, max_files=-1):
 # Merge + shuffle partial h5 files into one big h5
 # ---------------------------------------------------------------------------
 
+def _open_h5(path, mode, **kwargs):
+    """
+    Open HDF5 with locking disabled — required for EOS/NFS/GPFS/AFS filesystems
+    where POSIX advisory locks are broken or unavailable (errno 11).
+    Falls back gracefully for older h5py that doesn't support the keyword.
+    """
+    try:
+        return h5py.File(path, mode, locking=False, **kwargs)
+    except TypeError:
+        return h5py.File(path, mode, **kwargs)
+
+
 def merge_partial_h5(partial_paths, output_file, shuffle=True, read_chunk=50_000):
     if not partial_paths:
         print("No partial files to merge.")
         return 0
 
-    # Count total rows
+    # Count total rows open partials read-only with locking disabled
     sizes = []
     for p in tqdm(partial_paths, desc="Scanning partial files"):
         try:
-            with h5py.File(p, 'r') as f:
+            with _open_h5(p, 'r') as f:
                 sizes.append(int(f.attrs.get('num_tracksters', len(f['features']))))
-        except Exception:
+        except Exception as e:
+            print(f"  Warning: could not scan {osp.basename(p)}: {e}")
             sizes.append(0)
 
     total = sum(sizes)
@@ -318,68 +337,123 @@ def merge_partial_h5(partial_paths, output_file, shuffle=True, read_chunk=50_000
         print("No tracksters found in partial files.")
         return 0
 
-    print(f"Merging {total:,} tracksters from {len(partial_paths)} files {output_file}")
+    print(f"Merging {total:,} tracksters from {len(partial_paths)} files → {output_file}")
 
-    with h5py.File(output_file, 'w') as out:
-        ds_feat = out.create_dataset('features',     shape=(total, 3), dtype='f4',
-                                     chunks=(min(total, H5_CHUNK_SIZE), 3))
-        ds_pid  = out.create_dataset('true_pid',     shape=(total,),   dtype='i4')
-        ds_en   = out.create_dataset('true_energy',  shape=(total,),   dtype='f4')
-        ds_nclu = out.create_dataset('num_clusters', shape=(total,),   dtype='i4')
-        ds_clus = out.create_dataset('clusters',     shape=(total,),   dtype=_vlen_f32())
+    # Write to LOCAL disk to avoid EOS locking entirely
+    tmp_dir  = os.environ.get('TMPDIR', '/tmp')
+    tmp_file = osp.join(tmp_dir, f"merge_{os.getpid()}.h5")
+    print(f"  (writing to local temp: {tmp_file})")
 
-        out.attrs['num_tracksters']     = total
-        out.attrs['trackster_features'] = ['eta', 'phi', 'energy']
-        out.attrs['cluster_features']   = ['eta', 'phi', 'energy', 'layer']
+    try:
+        with h5py.File(tmp_file, 'w') as out:
+            ds_feat = out.create_dataset('features',     shape=(total, 3), dtype='f4',
+                                         chunks=(min(total, H5_CHUNK_SIZE), 3))
+            ds_pid  = out.create_dataset('true_pid',     shape=(total,),   dtype='i4')
+            ds_en   = out.create_dataset('true_energy',  shape=(total,),   dtype='f4')
+            ds_nclu = out.create_dataset('num_clusters', shape=(total,),   dtype='i4')
+            ds_clus = out.create_dataset('clusters',     shape=(total,),   dtype=_vlen_f32())
 
-        # --- Pass 1: stream-copy in file order ---
-        write_ptr = 0
-        for p, n in tqdm(zip(partial_paths, sizes), total=len(partial_paths),
-                         desc="Merging"):
-            if n == 0:
-                continue
-            try:
-                with h5py.File(p, 'r') as src:
-                    for start in range(0, n, read_chunk):
-                        end = min(start + read_chunk, n)
-                        b   = end - start
-                        dst = write_ptr + start
-                        ds_feat[dst:dst+b] = src['features'][start:end]
-                        ds_pid [dst:dst+b] = src['true_pid'][start:end]
-                        ds_en  [dst:dst+b] = src['true_energy'][start:end]
-                        ds_nclu[dst:dst+b] = src['num_clusters'][start:end]
-                        ds_clus[dst:dst+b] = src['clusters'][start:end]
-                write_ptr += n
-            except Exception as e:
-                print(f"  Warning: could not merge {p}: {e}")
+            out.attrs['num_tracksters']     = total
+            out.attrs['trackster_features'] = ['eta', 'phi', 'energy']
+            out.attrs['cluster_features']   = ['eta', 'phi', 'energy', 'layer']
 
-        # --- Pass 2: global in-place shuffle via index permutation ---
-        if shuffle:
-            print("Shuffling (in-place swap)")
+            # --- Pass 1: stream-copy partials → local temp ---
+            write_ptr = 0
+            for p, n in tqdm(zip(partial_paths, sizes), total=len(partial_paths),
+                             desc="Merging"):
+                if n == 0:
+                    continue
+                try:
+                    with _open_h5(p, 'r') as src:
+                        for start in range(0, n, read_chunk):
+                            end = min(start + read_chunk, n)
+                            b   = end - start
+                            dst = write_ptr + start
+                            ds_feat[dst:dst+b] = src['features'][start:end]
+                            ds_pid [dst:dst+b] = src['true_pid'][start:end]
+                            ds_en  [dst:dst+b] = src['true_energy'][start:end]
+                            ds_nclu[dst:dst+b] = src['num_clusters'][start:end]
+                            ds_clus[dst:dst+b] = src['clusters'][start:end]
+                    write_ptr += n
+                except Exception as e:
+                    print(f"  Warning: could not merge {osp.basename(p)}: {e}")
+
+            # --- Pass 2: write shuffle index (instant, used by dataloader) ---
             rng     = np.random.default_rng()
-            indices = rng.permutation(total)  # shape [total]
+            indices = rng.permutation(total).astype(np.int64)
+            out.create_dataset('shuffle_indices', data=indices, dtype='i8')
 
-            for start in tqdm(range(0, total, read_chunk), desc="Shuffling"):
-                end     = min(start + read_chunk, total)
-                src_idx = indices[start:end]   # where to READ from
+        if shuffle:
+            # Physical shuffle via a second sequential pass:
+            #   READ tmp_file sequentially (chunk by chunk, ascending row order)
+            #   WRITE each chunk to its shuffled destination in tmp2_file
+            # This avoids random-access reads on vlen cluster data entirely.
+            print("Shuffling (sequential two-pass rewrite)")
+            tmp2_file = osp.join(tmp_dir, f"merge_{os.getpid()}_shuffled.h5")
 
-                # Sort for sequential HDF5 reads (much faster)
-                sort_order     = np.argsort(src_idx)
-                sorted_src_idx = src_idx[sort_order]
+            # Pre-compute: for each source row i, which destination row does it go to?
+            # indices[dst] = src  =>  write_pos[src] = dst
+            write_pos = np.empty(total, dtype=np.int64)
+            write_pos[indices] = np.arange(total, dtype=np.int64)
 
-                tmp_feat = ds_feat[sorted_src_idx]
-                tmp_pid  = ds_pid [sorted_src_idx]
-                tmp_en   = ds_en  [sorted_src_idx]
-                tmp_nclu = ds_nclu[sorted_src_idx]
-                tmp_clus = ds_clus[sorted_src_idx]
+            try:
+                with h5py.File(tmp_file, 'r') as src_f, h5py.File(tmp2_file, 'w') as dst_f:
+                    ds2_feat = dst_f.create_dataset('features',     shape=(total, 3), dtype='f4',
+                                                    chunks=(min(total, H5_CHUNK_SIZE), 3))
+                    ds2_pid  = dst_f.create_dataset('true_pid',     shape=(total,),   dtype='i4')
+                    ds2_en   = dst_f.create_dataset('true_energy',  shape=(total,),   dtype='f4')
+                    ds2_nclu = dst_f.create_dataset('num_clusters', shape=(total,),   dtype='i4')
+                    ds2_clus = dst_f.create_dataset('clusters',     shape=(total,),   dtype=_vlen_f32())
+                    dst_f.create_dataset('shuffle_indices', data=indices, dtype='i8')
+                    dst_f.attrs['num_tracksters']     = total
+                    dst_f.attrs['trackster_features'] = ['eta', 'phi', 'energy']
+                    dst_f.attrs['cluster_features']   = ['eta', 'phi', 'energy', 'layer']
 
-                # Un-sort to restore permutation order before writing
-                unsort             = np.argsort(sort_order)
-                ds_feat[start:end] = tmp_feat[unsort]
-                ds_pid [start:end] = tmp_pid [unsort]
-                ds_en  [start:end] = tmp_en  [unsort]
-                ds_nclu[start:end] = tmp_nclu[unsort]
-                ds_clus[start:end] = tmp_clus[unsort]
+                    src_feat = src_f['features']
+                    src_pid  = src_f['true_pid']
+                    src_en   = src_f['true_energy']
+                    src_nclu = src_f['num_clusters']
+                    src_clus = src_f['clusters']
+
+                    for start in tqdm(range(0, total, read_chunk), desc="Shuffling"):
+                        end     = min(start + read_chunk, total)
+
+                        # Sequential read from source (fast)
+                        feat_buf = src_feat[start:end]
+                        pid_buf  = src_pid [start:end]
+                        en_buf   = src_en  [start:end]
+                        nclu_buf = src_nclu[start:end]
+                        clus_buf = src_clus[start:end]
+
+                        # Destination indices for this chunk
+                        dst_idx = write_pos[start:end]
+
+                        # Sort destinations to make writes as sequential as possible
+                        sort_d   = np.argsort(dst_idx)
+                        dst_sort = dst_idx[sort_d]
+
+                        ds2_feat[dst_sort] = feat_buf[sort_d]
+                        ds2_pid [dst_sort] = pid_buf [sort_d]
+                        ds2_en  [dst_sort] = en_buf  [sort_d]
+                        ds2_nclu[dst_sort] = nclu_buf[sort_d]
+                        ds2_clus[dst_sort] = clus_buf[sort_d]
+
+                os.replace(tmp2_file, tmp_file)
+
+            except Exception:
+                if osp.exists(tmp2_file):
+                    os.remove(tmp2_file)
+                raise
+
+        print(f"Copying local temp {output_file} ")
+        shutil.copy2(tmp_file, output_file)
+        print(f"Output written to {output_file}")
+
+    finally:
+        # Always clean up local temp files
+        for f in [tmp_file, osp.join(tmp_dir, f"merge_{os.getpid()}_shuffled.h5")]:
+            if osp.exists(f):
+                os.remove(f)
 
     return total
 
@@ -390,7 +464,7 @@ def merge_partial_h5(partial_paths, output_file, shuffle=True, read_chunk=50_000
 
 def process_files_parallel(input_files, partial_dir, num_workers=1):
     os.makedirs(partial_dir, exist_ok=True)
-    print(f"\n Processing {len(input_files)} files with {num_workers} worker(s)")
+    print(f"\nProcessing {len(input_files)} files with {num_workers} worker(s)…")
     print(f"Partial files {partial_dir}")
 
     partial_h5_paths = []
@@ -445,7 +519,7 @@ def main():
 
     # ---- Processing phase ----
     if not args.merge_only:
-        print("Collecting input files")
+        print("Collecting input files…")
         input_files = collect_input_files(args.input, args.max_files)
         if not input_files:
             print("No valid input files found!")
@@ -460,6 +534,12 @@ def main():
         return
 
     # ---- Merge phase ----
+    # Clean up any stale temp files from a previous crashed merge
+    output_dir = osp.dirname(osp.abspath(args.output))
+    for stale in glob(osp.join(output_dir, ".tmp_merge_*.h5")):
+        print(f"Removing stale temp file: {stale}")
+        os.remove(stale)
+
     total = merge_partial_h5(partial_paths, args.output, shuffle=not args.no_shuffle)
 
     print(f"\nDone. {total:,} tracksters written to {args.output}")
