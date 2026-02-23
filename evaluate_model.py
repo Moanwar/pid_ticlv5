@@ -343,8 +343,100 @@ def evaluate_onnx(onnx_path, loader, max_clusters=200):
     return metrics
 
 # 7. PLOTTING FUNCTIONS
-
 def plot_all_metrics(metrics, output_dir, prefix=''):
+    """Generate all evaluation plots"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 1. Confusion Matrix (full) - ONLY PERCENTAGES
+    plt.figure(figsize=(10, 8))
+    cm = confusion_matrix(metrics.all_labels, metrics.all_preds)
+    cm_pct = cm / cm.sum(axis=1, keepdims=True) * 100
+    annot = np.array([[f"{cm_pct[i,j]:.1f}%" for j in range(cm.shape[1])] for i in range(cm.shape[0])])
+
+    sns.heatmap(cm_pct, annot=annot, fmt='', cmap='Blues',  # Only percentages
+                xticklabels=class_names, yticklabels=class_names,
+                vmin=0, vmax=100, cbar_kws={'label': 'Percentage (%)'})
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Full Confusion Matrix (%)')
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{prefix}confusion_matrix_full.png'), dpi=150)
+    plt.close()
+    
+    # 2. EM vs HAD Confusion Matrix - ONLY PERCENTAGES
+    em_had_cm = metrics.get_em_vs_had_confusion()
+    plt.figure(figsize=(6, 5))
+    
+    # Convert to percentages (avoid division by zero)
+    row_sums = em_had_cm.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1  # Avoid division by zero
+    em_had_cm_pct = em_had_cm / row_sums * 100
+    annot = np.array([[f"{em_had_cm_pct[i,j]:.1f}%" for j in range(2)] for i in range(2)])
+    
+    sns.heatmap(em_had_cm_pct, annot=annot, fmt='', cmap='Blues',  #Only percentages
+                xticklabels=['EM', 'HAD'], yticklabels=['EM', 'HAD'],
+                vmin=0, vmax=100, cbar_kws={'label': 'Percentage (%)'})
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('EM vs HAD Confusion Matrix (%)')
+    
+    if em_had_cm.sum() > 0:
+        acc = (em_had_cm[0,0] + em_had_cm[1,1]) / em_had_cm.sum()
+        plt.text(0.5, -0.15, f'Accuracy: {acc:.4f}',
+                 transform=plt.gca().transAxes, ha='center', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{prefix}confusion_em_vs_had.png'), dpi=150)
+    plt.close()
+    
+    # 3. Per-class accuracy bar chart (unchanged, good)
+    per_class = metrics.get_per_class_accuracy()
+    plt.figure(figsize=(12, 6))
+    classes = list(per_class.keys())
+    accs = [per_class[c] if not np.isnan(per_class[c]) else 0 for c in classes]
+    colors = ['green' if not np.isnan(per_class[c]) else 'gray' for c in classes]
+    
+    plt.bar(range(len(classes)), accs, color=colors, alpha=0.7)
+    plt.xticks(range(len(classes)), [class_names[c] for c in classes], rotation=45, ha='right')
+    plt.ylabel('Accuracy')
+    plt.title('Per-Class Accuracy')
+    plt.ylim(0, 1)
+    
+    for i, (acc, c) in enumerate(zip(accs, classes)):
+        if not np.isnan(per_class[c]):
+            plt.text(i, acc + 0.02, f'{acc:.3f}', ha='center', va='bottom', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{prefix}per_class_accuracy.png'), dpi=150)
+    plt.close()
+    
+    # 4. Group accuracy pie chart (unchanged, good)
+    true_groups = metrics.get_group_labels(np.array(metrics.all_labels))
+    pred_groups = metrics.get_group_labels(np.array(metrics.all_preds))
+    group_correct = (true_groups == pred_groups).astype(float)
+    
+    plt.figure(figsize=(8, 8))
+    plt.pie([group_correct.mean(), 1 - group_correct.mean()],
+            labels=['Correct Group', 'Wrong Group'],
+            colors=['#2ecc71', '#e74c3c'],
+            autopct='%1.1f%%',
+            explode=(0.05, 0.05))
+    plt.title(f'Group Accuracy (EM/HAD/Other): {group_correct.mean():.4f}')
+    plt.savefig(os.path.join(output_dir, f'{prefix}group_accuracy.png'), dpi=150)
+    plt.close()
+    
+    # 5. Print summary (unchanged)
+    print(f"\n{'='*60}")
+    print(f"Evaluation Summary - {prefix}")
+    print(f"{'='*60}")
+    print(f"Overall Accuracy: {metrics.accuracy:.4f}")
+    print(f"Group Accuracy: {metrics.get_group_accuracy():.4f}")
+    print(f"\nPer-Class Accuracy:")
+    for c, acc in per_class.items():
+        status = f"{acc:.4f}" if not np.isnan(acc) else "N/A (no samples)"
+        print(f"  {class_names[c]:<15}: {status}")
+
+def plot_all_metricsv0(metrics, output_dir, prefix=''):
     """Generate all evaluation plots"""
     os.makedirs(output_dir, exist_ok=True)
     
@@ -449,10 +541,56 @@ def plot_all_metrics(metrics, output_dir, prefix=''):
         status = f"{acc:.4f}" if not np.isnan(acc) else "N/A (no samples)"
         print(f"  {class_names[c]:<15}: {status}")
 
-# ============================================
-# 8. MAIN
-# ============================================
-
+def plot_em_vs_had_scores(metrics, output_dir, prefix=''):
+    if not hasattr(metrics, 'all_probs') or not metrics.all_probs:
+        print("  Warning: No probability scores available for EM vs HAD plot")
+        return
+    
+    probs = np.array(metrics.all_probs)  # [n_samples, n_classes]
+    labels = np.array(metrics.all_labels)
+    
+    # Get EM (0,1) and HAD (4,5) samples
+    em_mask = (labels == 0) | (labels == 1)
+    had_mask = (labels == 4) | (labels == 5)
+    
+    if not em_mask.any() or not had_mask.any():
+        print("  Warning: Not enough EM or HAD samples for score distribution")
+        return
+    
+    # For EM samples: probability assigned to EM classes (sum of probs for classes 0+1)
+    em_probs = probs[em_mask][:, [0, 1]].sum(axis=1)
+    
+    # For HAD samples: probability assigned to HAD classes (sum of probs for classes 4+5)
+    #had_probs = probs[had_mask][:, [4, 5]].sum(axis=1)
+    had_probs = probs[had_mask][:, [0, 1]].sum(axis=1)
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Plot histograms
+    bins = np.linspace(0, 1, 30)
+    plt.hist(em_probs, bins=bins, alpha=0.7, label='EM Samples', color='blue', density=True)
+    plt.hist(had_probs, bins=bins, alpha=0.7, label='HAD Samples', color='red', density=True)
+    
+    # Add vertical line at 0.5 (decision boundary)
+    plt.axvline(x=0.5, color='black', linestyle='--', alpha=0.5, label='Decision Boundary')
+    
+    plt.xlabel('Predicted Probability for Correct Group', fontsize=12)
+    plt.ylabel('Density', fontsize=12)
+    plt.title('EM vs HAD Prediction Confidence Distribution', fontsize=14, fontweight='bold')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Add statistics
+    textstr = f'EM Mean Conf: {em_probs.mean():.3f}\nHAD Mean Conf: {had_probs.mean():.3f}'
+    plt.text(0.05, 0.95, textstr, transform=plt.gca().transAxes,
+             fontsize=10, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, f'{prefix}em_vs_had_scores.png'), dpi=150)
+    plt.close()
+    
+# 9. MAIN
 def main():
     parser = argparse.ArgumentParser(description='Evaluate Set Transformer model')
     parser.add_argument('--input', '-i', type=str, required=True,
@@ -543,7 +681,8 @@ def main():
         
         # Plot PyTorch results
         plot_all_metrics(metrics_pt, args.output_dir, prefix='pytorch_')
-        
+        plot_em_vs_had_scores(metrics_pt, args.output_dir, prefix='pytorch_')
+
         print(f"\nPyTorch Evaluation completed in {pt_time:.2f}s")
         print(f"Accuracy: {metrics_pt.accuracy:.4f}")
         print(f"Group Accuracy: {metrics_pt.get_group_accuracy():.4f}")
