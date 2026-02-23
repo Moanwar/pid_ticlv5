@@ -10,6 +10,17 @@ python train_transformer.py --input ticl_dataset.h5 --amp
 
 # With torch.compile (PyTorch 2.0+, free ~30% speedup)
 python train_transformer.py --input ticl_dataset.h5 --compile
+
+# First training run (60 epochs)
+python train_transformer.py --input ticl_dataset.h5 --epochs 60
+
+# Resume for another 30 epochs (total 90)
+python train_transformer.py --input ticl_dataset.h5 --epochs 30 --resume ./output/best_set_transformer.pt
+
+# Resume for another 60 epochs (total 120)
+python train_transformer.py --input ticl_dataset.h5 --epochs 60 --resume ./output/best_set_transformer.pt
+
+
 """
 
 import torch
@@ -433,6 +444,8 @@ def main():
                         help='Use automatic mixed precision (faster on GPU, ~2x memory saving)')
     parser.add_argument('--compile', action='store_true',
                         help='torch.compile the model (PyTorch 2.0+, free ~30% speedup)')
+    parser.add_argument('--resume', '-r', type=str, default=None,
+                        help='Path to checkpoint .pt file to resume training from')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -504,7 +517,50 @@ def main():
         print("Mixed precision (AMP) enabled.")
 
     criterion = HierarchicalLoss().to(device)
+    # ========== RESUME LOGIC ==========
+    start_epoch = 0
+    best_val_group_acc = 0
+    best_val_acc = 0
+    history = dict(train_loss=[], val_loss=[], train_acc=[], val_acc=[],
+                   train_gacc=[], val_gacc=[])
 
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"\nLoading checkpoint from {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            
+            # Handle model state dict (with or without compile)
+            state_dict = checkpoint['model_state_dict']
+            if hasattr(model, '_orig_mod'):
+                state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+            model.load_state_dict(state_dict)
+            
+            # Load optimizer
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Load scheduler
+            if 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            
+            # Load scaler
+            if scaler and 'scaler_state_dict' in checkpoint and checkpoint['scaler_state_dict']:
+                scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            
+            # Load training state
+            start_epoch = checkpoint.get('epoch', 0)
+            best_val_group_acc = checkpoint.get('best_val_group_acc', 0)
+            best_val_acc = checkpoint.get('best_val_acc', 0)
+            
+            # Load history
+            if 'history' in checkpoint:
+                history = checkpoint['history']
+            
+            print(f"Resumed from epoch {start_epoch}")
+            print(f"Previous best: Group Acc={best_val_group_acc:.4f}, Class Acc={best_val_acc:.4f}")
+        else:
+            print(f"Checkpoint {args.resume} not found. Starting from scratch.")
+
+            
     # ---- Training loop ----
     best_val_group_acc = 0
     patience_counter   = 0
@@ -542,13 +598,17 @@ def main():
 
         if val_gacc > best_val_group_acc:
             best_val_group_acc = val_gacc
+            # Replace your existing torch.save with this (around line 520-530)
             torch.save({
-                'epoch':             epoch,
-                'model_state_dict':  model.state_dict(),
+                'epoch': epoch + 1,  # Save next epoch to start from
+                'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'val_group_acc':     val_gacc,
-                'val_acc':           val_acc,
-                'args':              args,
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict() if scaler else None,
+                'best_val_group_acc': best_val_group_acc,
+                'best_val_acc': best_val_acc,
+                'args': args,
+                'history': history,  # Save training history for plotting
             }, os.path.join(args.output_dir, 'best_set_transformer.pt'))
             print(f"New best model saved (group_acc={val_gacc:.4f})")
             patience_counter = 0
@@ -561,16 +621,19 @@ def main():
     total_time = time.time() - start_time
     print(f"\nTraining completed in {total_time/60:.2f} minutes")
 
-    # ---- Test evaluation ----
-    checkpoint = torch.load(os.path.join(args.output_dir, 'best_set_transformer.pt'))
-    # Handle compiled model (state dict keys may have _orig_mod prefix)
-    state = checkpoint['model_state_dict']
-    try:
-        model.load_state_dict(state)
-    except RuntimeError:
-        # Strip torch.compile prefix if needed
-        state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
-        model.load_state_dict(state)
+    # ---- Load best model for evaluation ----
+    checkpoint_path = args.resume if args.resume else os.path.join(args.output_dir, 'best_set_transformer.pt')
+    if os.path.isfile(checkpoint_path):
+        print(f"Loading best model from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    
+        # Handle compiled model
+        state_dict = checkpoint['model_state_dict']
+        if hasattr(model, '_orig_mod'):
+            state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+    else:
+        print("No checkpoint found for evaluation!")
 
     test_loss, test_acc, test_gacc, test_preds, test_labels = evaluate(
         model, test_loader, criterion, device, scaler)
