@@ -29,7 +29,7 @@ with h5py.File(path, 'r') as f:
     true_enfrac = f['true_enfrac'][:5]
     num_clusters= f['num_clusters'][:5]
     clusters    = f['clusters'][:5]
-
+    print("clusters ", clusters)
     for i in range(5):
         print(f"\n  [{i}] features={features[i]}  pid={true_pid[i]}"
               f"  energy={true_energy[i]:.3f}  enfrac={true_enfrac[i]:.3f}"
