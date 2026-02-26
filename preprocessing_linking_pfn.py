@@ -2,31 +2,31 @@
 
 """
 # Single ROOT file
-python preprocessing_clu3d.py --input data/sample.root
+python preprocessing_linking.py --input data/sample.root
 
 # Single text file with list of ROOT files
-python preprocessing_clu3d.py --input file_list.txt
+python preprocessing_linking.py --input file_list.txt
 
 # Multiple text files
-python preprocessing_clu3d.py --input list1.txt list2.txt list3.txt
+python preprocessing_linking.py --input list1.txt list2.txt list3.txt
 
 # Directory containing ROOT files
-python preprocessing_clu3d.py --input /path/to/root/files/
+python preprocessing_linking.py --input /path/to/root/files/
 
 # Mix of sources
-python preprocessing_clu3d.py --input single.root list.txt /data/dir/
+python preprocessing_linking.py --input single.root list.txt /data/dir/
 
 # With options
-python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
+python preprocessing_linking.py --input file_list.txt --output mydata.h5 --num-workers 8 --max-files 50
 
 # Just merge with no shuffle
-python preprocessing_clu3d.py --input dummy --output ticl_clu3d_data.h5 --merge-only --no-shuffle --partial-dir ticl_clu3d_data_partials/
+python preprocessing_linking.py --input dummy --output ticl_linking_data_pfn.h5 --merge-only --no-shuffle --partial-dir ticl_linking_data_pfn_partials/
 
 # Merge and shuffle
-python preprocessing_clu3d.py --input dummy --output ticl_clu3d_data.h5 --merge-only --partial-dir ticl_clu3d_data_partials/
+python preprocessing_linking.py --input dummy --output ticl_linking_data_pfn.h5 --merge-only --partial-dir ticl_linking_data_pfn_partials/
 
 # Only merge already-processed partial files (skip processing, useful after a crash)
-python preprocessing_clu3d.py --input file_list.txt --output mydata.h5 --merge-only
+python preprocessing_linking.py --input file_list.txt --output mydata.h5 --merge-only
 
 Output shapes per trackster:
   clusters  : (50, 10, 7)  float32
@@ -277,7 +277,7 @@ def process_root_file(file_path, partial_dir):
     try:
         file = uproot.open(file_path)
 
-        tracksters_tree   = load_branch_with_highest_cycle(file, 'ticlDumper/ticlTrackstersCLUE3DHigh')
+        tracksters_tree   = load_branch_with_highest_cycle(file, 'ticlDumper/ticlCandidate')
         simcandidate_tree = load_branch_with_highest_cycle(file, 'ticlDumper/simTICLCandidate')
         associations_tree = load_branch_with_highest_cycle(file, 'ticlDumper/associations')
         clusters_tree     = load_branch_with_highest_cycle(file, 'ticlDumper/clusters')
@@ -290,12 +290,12 @@ def process_root_file(file_path, partial_dir):
         clusters   = clusters_tree.arrays(CLUSTER_FEATURES,     library="ak")
 
         assoc_branches = [
-            'ticlTrackstersCLUE3DHigh_simToReco_CP_sharedE',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP',
-            'ticlTrackstersCLUE3DHigh_simToReco_CP_score',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP_score',
-            'ticlTrackstersCLUE3DHigh_simToReco_CP',
-            'ticlTrackstersCLUE3DHigh_recoToSim_CP_sharedE',
+            'ticlCandidate_simToReco_CP_sharedE',
+            'ticlCandidate_recoToSim_CP',
+            'ticlCandidate_simToReco_CP_score',
+            'ticlCandidate_recoToSim_CP_score',
+            'ticlCandidate_simToReco_CP',
+            'ticlCandidate_recoToSim_CP_sharedE',
         ]
         # deduplicate while preserving order
         seen_b = set()
@@ -312,13 +312,14 @@ def process_root_file(file_path, partial_dir):
 
         for event_idx in range(len(tracksters)):
             try:
-                sim_to_reco_sharedE = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP_sharedE'][event_idx]
+                sim_to_reco_sharedE = assoc['ticlCandidate_simToReco_CP_sharedE'][event_idx]
                 if sim_to_reco_sharedE is None or len(sim_to_reco_sharedE) == 0:
                     continue
 
-                reco_to_sim_scores = assoc['ticlTrackstersCLUE3DHigh_recoToSim_CP_score'][event_idx]
-                sim_to_reco_scores = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP_score'][event_idx]
-                sim_to_reco_index  = assoc['ticlTrackstersCLUE3DHigh_simToReco_CP'][event_idx]
+                reco_to_sim_scores = assoc['ticlCandidate_recoToSim_CP_score'][event_idx]
+                sim_to_reco_scores = assoc['ticlCandidate_simToReco_CP_score'][event_idx]
+                sim_to_reco_index  = assoc['ticlCandidate_simToReco_CP'][event_idx]
+
 
                 # ---- Build per-event cluster feature matrix ONCE ----
                 # Columns: [energy, |eta|, phi, x, y, |z|, num_hits]
@@ -676,8 +677,8 @@ def main():
     )
     parser.add_argument('--input', '-i', type=str, nargs='+', required=True,
                         help='Input: .root file(s), .txt file(s) with file lists, or directory(ies)')
-    parser.add_argument('--output', '-o', type=str, default='ticl_clu3d_data_pfn.h5',
-                        help='Output HDF5 file (default: ticl_clu3d_data_pfn.h5)')
+    parser.add_argument('--output', '-o', type=str, default='ticl_linking_data_pfn.h5',
+                        help='Output HDF5 file (default: ticl_linking_data_pfn.h5)')
     parser.add_argument('--partial-dir', type=str, default=None,
                         help='Directory for per-file partial HDF5 files '
                              '(default: <output_stem>_partials/)')
